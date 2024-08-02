@@ -116,16 +116,60 @@ const char* TaskSystemParallelThreadPoolSpinning::name() {
     return "Parallel + Thread Pool + Spin";
 }
 
-TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int num_threads): ITaskSystem(num_threads) {
+TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int num_threads)
+: ITaskSystem(num_threads), thread_pool(num_threads) {
     //
     // TODO: CS149 student implementations may decide to perform setup
     // operations (such as thread pool construction) here.
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+    task_info_ptr = new task_info_ThreadPoolSpinning;
+    for(auto& pthread : thread_pool) {
+        pthread = std::thread(&TaskSystemParallelThreadPoolSpinning::thread_func, this);
+    }
 }
 
-TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {}
+TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
+    thread_state.mmutex.lock();
+    thread_state.killed = true;
+    thread_state.mmutex.unlock();
+    for(auto& pthread : thread_pool) {
+        pthread.join();
+    }
+    delete task_info_ptr;
+}
+
+void TaskSystemParallelThreadPoolSpinning::thread_func() {
+    int old_value;
+    task_info_ThreadPoolSpinning& t = *task_info_ptr;
+    while(true) {
+        thread_state.mmutex.lock();
+        if(thread_state.killed == true) {
+            thread_state.mmutex.unlock();
+            break;
+        }
+        if(thread_state.have_task == false) {
+            thread_state.mmutex.unlock();
+            continue;
+        }
+        thread_state.mmutex.unlock();
+
+        t.mmutex.lock();
+        old_value = t.index;
+        if(old_value == t.num_total_tasks) {
+            t.mmutex.unlock();
+            continue;
+        } else {
+            t.index++;
+            t.mmutex.unlock();
+            t.runnable->runTask(old_value, t.num_total_tasks);
+            t.mmutex.lock();
+            t.finished++;
+            t.mmutex.unlock();
+        }
+    }
+}
 
 void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_total_tasks) {
 
@@ -135,9 +179,27 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
     // method in Part A.  The implementation provided below runs all
     // tasks sequentially on the calling thread.
     //
+    task_info_ThreadPoolSpinning& t = *task_info_ptr;
+    t.mmutex.lock();
+    thread_state.mmutex.lock();
+    thread_state.have_task = true;
+    t.runnable = runnable;
+    t.num_total_tasks = num_total_tasks;
+    t.index = 0;
+    t.finished = 0;
+    thread_state.mmutex.unlock();
+    t.mmutex.unlock();
 
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    while(true) {
+        t.mmutex.lock();
+        if(t.finished == num_total_tasks) {
+            t.mmutex.unlock();
+            thread_state.mmutex.lock();
+            thread_state.have_task = false;
+            thread_state.mmutex.unlock();
+            break; 
+        }
+        t.mmutex.unlock();
     }
 }
 
