@@ -192,7 +192,7 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
 
     while(true) {
         t.mmutex.lock();
-        if(t.finished == num_total_tasks) {
+        if(t.finished == t.num_total_tasks) {
             t.mmutex.unlock();
             thread_state.mmutex.lock();
             thread_state.have_task = false;
@@ -224,13 +224,18 @@ const char* TaskSystemParallelThreadPoolSleeping::name() {
     return "Parallel + Thread Pool + Sleep";
 }
 
-TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads): ITaskSystem(num_threads) {
+TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads)
+: ITaskSystem(num_threads), thread_pool(num_threads) {
     //
     // TODO: CS149 student implementations may decide to perform setup
     // operations (such as thread pool construction) here.
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+    task_info_ptr = new task_info_ThreadPoolSleeping;
+    for(auto& pthread : thread_pool) {
+        pthread = std::thread(&TaskSystemParallelThreadPoolSleeping::thread_func, this);
+    }
 }
 
 TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
@@ -240,6 +245,46 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+    thread_state.mmutex.lock();
+    thread_state.killed = true;
+    thread_state.mmutex.unlock();
+    thread_state.can_running.notify_all();
+
+    for(auto& pthread : thread_pool) {
+        pthread.join();
+    }
+
+    delete task_info_ptr;
+}
+
+void TaskSystemParallelThreadPoolSleeping::thread_func() {
+    int old_value;
+    task_info_ThreadPoolSleeping& t = *task_info_ptr;
+    while(true) {
+        {
+            std::unique_lock<std::mutex> lk(thread_state.mmutex);
+            if(thread_state.killed == true) {
+                break;
+            }
+            if(thread_state.have_task == false) {
+                thread_state.can_running.wait(lk);
+            }
+        }
+
+        t.mmutex.lock();
+        old_value = t.index;
+        if(old_value == t.num_total_tasks) {
+            t.mmutex.unlock();
+            continue;
+        } else {
+            t.index++;
+            t.mmutex.unlock();
+            t.runnable->runTask(old_value, t.num_total_tasks);
+            t.mmutex.lock();
+            t.finished++;
+            t.mmutex.unlock();
+        }
+    }
 }
 
 void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_total_tasks) {
@@ -251,8 +296,28 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     // tasks sequentially on the calling thread.
     //
 
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    task_info_ThreadPoolSleeping& t = *task_info_ptr;
+    t.mmutex.lock();
+    thread_state.mmutex.lock();
+    thread_state.have_task = true;
+    t.runnable = runnable;
+    t.num_total_tasks = num_total_tasks;
+    t.index = 0;
+    t.finished = 0;
+    thread_state.mmutex.unlock();
+    t.mmutex.unlock();
+    thread_state.can_running.notify_all();
+    
+    while(true) {
+        t.mmutex.lock();
+        if(t.finished == t.num_total_tasks) {
+            t.mmutex.unlock();
+            thread_state.mmutex.lock();
+            thread_state.have_task = false;
+            thread_state.mmutex.unlock();
+            break;
+        }
+        t.mmutex.unlock();
     }
 }
 
